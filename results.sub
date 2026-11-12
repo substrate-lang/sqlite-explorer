@@ -1,0 +1,103 @@
+;; A query's result as the explorer shows it: its columns, and its first 200 rows as text, with each number's value.
+(require-unqualified sqlite)
+(require-unqualified host/modules/clock)
+
+(provide cell row result result-run! result-free! number-text write-number!)
+
+(struct cell [id u32] [text string] [number bool] [value f64])
+(struct row [id u32] [cells (ptr cell)])
+(struct result [a arena] [ran bool] [columns (ptr cell)] [width u32] [rows (ptr row)] [count u32] [total u32]
+  [ms f64] [problem string])
+
+(const shown-rows u32 200)
+
+(define (grouped! [b (ptr buffer)] [n u64])
+  (if (< n 10000)
+      (write-digits b n 10)
+      (let ([digits (array u8 20)] [k u32 0])
+        (while #t
+          (set! (@ digits k) (cast u8 (+ #\0 (% n 10))))
+          (+= k 1)
+          (set! n (/ n 10))
+          (when (== n 0) (break)))
+        (for ([i u32 k]) (> i 0) (-= i 1)
+          (buffer-add-byte! b (cast i32 (@ digits (- i 1))))
+          (when (and (> i 1) (== (% (- i 1) 3) 0)) (buffer-add-byte! b #\,))))))
+
+(define (write-number! [b (ptr buffer)] [x f64])
+  (let* ([cents (cast i64 (nearbyint (* x 100.0)))] [whole (/ (if (< cents 0) (- 0 cents) cents) 100)]
+         [part (% (if (< cents 0) (- 0 cents) cents) 100)])
+    (when (< cents 0) (buffer-add-byte! b #\-))
+    (grouped! b (cast u64 whole))
+    (when (!= part 0)
+      (buffer-add-byte! b #\.)
+      (buffer-add-byte! b (cast i32 (+ #\0 (/ part 10))))
+      (when (!= (% part 10) 0) (buffer-add-byte! b (cast i32 (+ #\0 (% part 10))))))))
+
+(define (number-text [a (ptr arena)] [x f64]) -> string
+  (let ([b (make-buffer)])
+    (write-number! (& b) x)
+    (let ([s (copy a (buffer-string (& b)))]) (buffer-free! (& b)) s)))
+
+(define (cell! [c (ptr cell)] [a (ptr arena)] [st (ptr sqlite-statement)] [i i32] [b (ptr buffer)])
+  (set! (-> b length) 0)
+  (case (sqlite-column-type st i)
+    [(1)
+     (let ([n (sqlite-column-i64 st i)])
+       (when (< n 0) (buffer-add-byte! b #\-))
+       (grouped! b (cast u64 (if (< n 0) (- 0 n) n)))
+       (set! (-> c number) #t)
+       (set! (-> c value) (cast f64 n)))]
+    [(2)
+     (set! (-> c value) (sqlite-column-f64 st i))
+     (set! (-> c number) #t)
+     (write-number! b (-> c value))]
+    [(3) (buffer-add-string! b (sqlite-column-text st i))]
+    [(4) (buffer-add-string! b "(blob)")]
+    [else (buffer-add-string! b "null")])
+  (set! (-> c text) (copy a (buffer-string b))))
+
+(define (result-free! [r (ptr result)])
+  (when (-> r ran) (arena-free (& (-> r a))))
+  (memset r 0 (sizeof result)))
+
+(define (result-run! [r (ptr result)] [db (ptr sqlite)] [sql string])
+  (result-free! r)
+  (set! (-> r a) (make-arena))
+  (set! (-> r ran) #t)
+  (let* ([a (& (-> r a))] [why string] [start (clock-monotonic)] [st (sqlite-prepare db sql (& why))] [b (make-buffer)])
+    (when (== st 0)
+      (set! (-> r problem) (copy a why))
+      (return))
+    (let ([width (cast u32 (sqlite-column-count st))] [rows (new a row shown-rows)] [done #f])
+      (set! (-> r width) width)
+      (set! (-> r columns) (-> (new a cell width) items))
+      (for ([i u32 0]) (< i width) (+= i 1)
+        (let ([c (+ (-> r columns) i)])
+          (set! (-> c id) i)
+          (set! (-> c text) (copy a (sqlite-column-name st (cast i32 i))))))
+      (set! (-> r rows) (-> rows items))
+      (while (not done)
+        (let ([step (sqlite-step st (& why))])
+          (cond [(== step sqlite-row)
+                 (when (< (-> r count) shown-rows)
+                   (let ([w (+ (-> r rows) (-> r count))])
+                     (set! (-> w id) (-> r count))
+                     (set! (-> w cells) (-> (new a cell width) items))
+                     (for ([i u32 0]) (< i width) (+= i 1)
+                       (set! (-> (+ (-> w cells) i) id) i)
+                       (cell! (+ (-> w cells) i) a st (cast i32 i) (& b)))
+                     (+= (-> r count) 1)))
+                 (+= (-> r total) 1)]
+                [(== step sqlite-done) (set! done #t)]
+                [else
+                 (set! (-> r problem) (copy a why))
+                 (set! done #t)]))))
+    (sqlite-finalize st)
+    (buffer-free! (& b))
+    (set! (-> r ms) (- (clock-monotonic) start))
+    (for ([j u32 0]) (< j (-> r width)) (+= j 1)
+      (let ([numeric (> (-> r count) 0)])
+        (for ([i u32 0]) (< i (-> r count)) (+= i 1)
+          (unless (-> (+ (-> (+ (-> r rows) i) cells) j) number) (set! numeric #f)))
+        (set! (-> (+ (-> r columns) j) number) numeric)))))

@@ -1,0 +1,16 @@
+;; The explorer's routes, which a server answers with the explorer's page too.
+(require-unqualified std/http/form)
+(require-unqualified std/http/routable)
+
+(provide place dashboard ask database table lost ask-form place.url-read place.url-write! place.url-check)
+
+(struct ask-form [q (ptr string)])
+
+(form ask-form)
+
+(routable place #:missing lost
+  [dashboard ()]
+  [ask ("query" "") (query ask-form)]
+  [database ("database" "")]
+  [table ("database" [name string] "")]
+  [#:moved ("index.html") dashboard])

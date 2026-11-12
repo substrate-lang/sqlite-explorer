@@ -1,0 +1,113 @@
+;; The ways the explorer shows a result: a table, and for rows of a label and a number, a chart in SVG. The chart is a
+;; line when the labels are dates and bars when they are not.
+(require-unqualified web-ui)
+(require-unqualified std/string)
+(require-unqualified "results.sub")
+
+(provide chart chart-of! chart-free! chart-bars chart-line result-table bar-chart line-chart)
+
+(const chart-none u32 0)
+(const chart-bars u32 1)
+(const chart-line u32 2)
+
+(struct bar [id u32] [label string] [shown string] [y f64] [width f64])
+(struct dot [id u32] [x f64] [y f64] [label string] [shown string])
+(struct chart [kind u32] [a arena] [bars (ptr bar)] [dots (ptr dot)] [count u32] [box string] [points string]
+  [first string] [last string] [top string])
+
+(const most-bars u32 24)
+
+(define (cell-at [r (ptr result)] [i u32] [j u32]) -> (ptr cell) (+ (-> (+ (-> r rows) i) cells) j))
+
+(define (fits? [r (ptr result)]) -> bool
+  (unless (and (== (-> r width) 2) (>= (-> r count) 2)) (return #f))
+  (for ([i u32 0]) (< i (-> r count)) (+= i 1)
+    (when (or (-> (cell-at r i 0) number) (not (-> (cell-at r i 1) number))) (return #f)))
+  #t)
+
+(define (dated? [label string]) -> bool
+  (and (>= (-> label length) 4) (or (== (-> label length) 4) (== (@ label 4) #\-))
+       (char-numeric? (@ label 0)) (char-numeric? (@ label 1)) (char-numeric? (@ label 2)) (char-numeric? (@ label 3))))
+
+(define (chart-free! [c (ptr chart)])
+  (unless (== (-> c kind) chart-none) (arena-free (& (-> c a))))
+  (memset c 0 (sizeof chart)))
+
+(define (highest [r (ptr result)] [n u32]) -> f64
+  (let ([top 0.0])
+    (for ([i u32 0]) (< i n) (+= i 1) (when (> (-> (cell-at r i 1) value) top) (set! top (-> (cell-at r i 1) value))))
+    (if (> top 0.0) top 1.0)))
+
+(define (bars! [c (ptr chart)] [r (ptr result)])
+  (let* ([a (& (-> c a))] [n (if (< (-> r count) most-bars) (-> r count) most-bars)] [top (highest r n)]
+         [b (make-buffer)])
+    (set! (-> c bars) (-> (new a bar n) items))
+    (for ([i u32 0]) (< i n) (+= i 1)
+      (let ([x (+ (-> c bars) i)] [v (-> (cell-at r i 1) value)])
+        (set! (-> x id) i)
+        (set! (-> x label) (-> (cell-at r i 0) text))
+        (set! (-> x shown) (-> (cell-at r i 1) text))
+        (set! (-> x y) (+ 4.0 (* 26.0 (cast f64 i))))
+        (set! (-> x width) (if (> v 0.0) (* 220.0 (/ v top)) 0.0))))
+    (buffer-add-string! (& b) "0 0 440 ")
+    (write-digits (& b) (cast u64 (+ 8 (* 26 n))) 10)
+    (set! (-> c box) (copy a (buffer-string (& b))))
+    (buffer-free! (& b))
+    (set! (-> c count) n)))
+
+(define (line! [c (ptr chart)] [r (ptr result)])
+  (let* ([a (& (-> c a))] [n (-> r count)] [top (highest r n)] [b (make-buffer)] [peak u32 0])
+    (set! (-> c dots) (-> (new a dot n) items))
+    (for ([i u32 0]) (< i n) (+= i 1)
+      (let ([d (+ (-> c dots) i)] [v (-> (cell-at r i 1) value)])
+        (set! (-> d id) i)
+        (set! (-> d x) (+ 8.0 (/ (* 424.0 (cast f64 i)) (cast f64 (- n 1)))))
+        (set! (-> d y) (- 176.0 (* 152.0 (/ (if (> v 0.0) v 0.0) top))))
+        (set! (-> d label) (-> (cell-at r i 0) text))
+        (set! (-> d shown) (-> (cell-at r i 1) text))
+        (when (> v (-> (cell-at r peak 1) value)) (set! peak i))
+        (unless (== i 0) (buffer-add-byte! (& b) #\space))
+        (write-number! (& b) (-> d x))
+        (buffer-add-byte! (& b) #\,)
+        (write-number! (& b) (-> d y))))
+    (set! (-> c points) (copy a (buffer-string (& b))))
+    (buffer-free! (& b))
+    (set! (-> c first) (-> (cell-at r 0 0) text))
+    (set! (-> c last) (-> (cell-at r (- n 1) 0) text))
+    (set! (-> c top) (-> (cell-at r peak 1) text))
+    (set! (-> c count) n)))
+
+(define (chart-of! [c (ptr chart)] [r (ptr result)])
+  (chart-free! c)
+  (when (fits? r)
+    (set! (-> c a) (make-arena))
+    (if (dated? (-> (cell-at r 0 0) text))
+        (begin (set! (-> c kind) chart-line) (line! c r))
+        (begin (set! (-> c kind) chart-bars) (bars! c r)))))
+
+(view (bar-chart [c (ptr chart)])
+  (svg ([class "chart"] [viewBox (-> c box)] ["role" "img"])
+    (each [b (-> c bars) (-> c count)] #:key (-> b id)
+      (g
+        (text ([x 0] [y (+ (-> b y) 12.5)] [class "label"]) (text (-> b label)))
+        (rect ([x 150] [y (-> b y)] [width (-> b width)] [height 17] [rx 2]))
+        (text ([x (+ 158.0 (-> b width))] [y (+ (-> b y) 12.5)] [class "value"]) (text (-> b shown)))))))
+
+(view (line-chart [c (ptr chart)])
+  (svg ([class "chart"] [viewBox "0 0 440 200"] ["role" "img"])
+    (line ([x1 8] [y1 176] [x2 432] [y2 176] [class "axis"]))
+    (polyline ([points (-> c points)] [class "trace"]))
+    (each [d (-> c dots) (-> c count)] #:key (-> d id)
+      (circle ([cx (-> d x)] [cy (-> d y)] [r 3]) (title (text (-> d label)) ": " (text (-> d shown)))))
+    (text ([x 8] [y 14] [class "value"]) "peak " (text (-> c top)))
+    (text ([x 8] [y 196] [class "label"]) (text (-> c first)))
+    (text ([x 432] [y 196] [class "label"] [text-anchor "end"]) (text (-> c last)))))
+
+(view (row-view [w (ptr row)] [width u32])
+  (tr (each [c (-> w cells) width] #:key (-> c id) (td ([class (if (-> c number) "number" "")]) (text (-> c text))))))
+
+(view (result-table [r (ptr result)])
+  (div ([class "table"])
+    (table
+      (thead (tr (each [c (-> r columns) (-> r width)] #:key (-> c id) (th ([class (if (-> c number) "number" "")]) (text (-> c text))))))
+      (tbody (each [w (-> r rows) (-> r count)] #:key (-> w id) (row-view w (-> r width)))))))

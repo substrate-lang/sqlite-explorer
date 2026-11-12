@@ -1,0 +1,403 @@
+;; The explorer: a dashboard over the shop's data (dashboard.sub), a page that runs queries in the query language
+;; (query.sub), and a page with the database's tables. Its routes are in routes.sub.
+(require-unqualified web-ui)
+(require-unqualified compiler/macros)
+(require-unqualified compiler/reader)
+(require-unqualified std/string)
+(require-unqualified sqlite)
+(require-unqualified "routes.sub")
+(require-unqualified "schema.sub")
+(require-unqualified "query.sub")
+(require-unqualified "data.sub")
+(require-unqualified "results.sub")
+(require-unqualified "views.sub")
+(require-unqualified "dashboard.sub")
+
+(provide explorer)
+
+(struct column-info [id u32] [name string] [type string])
+(struct table-info [id u32] [name string] [title string] [size string] [few bool] [columns (ptr column-info)]
+  [width u32] [text string])
+
+(struct explorer-state [at place] [db (ptr sqlite)] [version string] [failed string] [board board]
+  [shelf arena] [tables (ptr table-info)] [table-count u32] [shown (ptr table-info)] [rows result]
+  [draft string] [talk arena] [talking bool] [sql string] [problem string] [summary string] [result result] [chart chart])
+
+(variant explorer-message
+  [went [to place]]
+  [edited [text string]]
+  [pressed [key string] [control bool] [meta bool]]
+  [run]
+  [example [text string]])
+
+(define examples (array string 4)
+  (array-of string
+            "(from products\n  (where (< price 10))\n  (select name category price)\n  (order price))"
+            "(from orders\n  (join products (= orders.product products.id))\n  (where (= products.category \"Tea\"))\n  (group (month orders.date))\n  (select (as (month orders.date) month) (as (sum orders.quantity) packs))\n  (order month))"
+            "(from customers\n  (where (in country \"Spain\" \"Portugal\"))\n  (group city)\n  (select city (as (count) customers))\n  (order (desc customers)))"
+            "(from orders\n  (group (year date))\n  (select (as (year date) year) (as (count) orders) (as (round (avg total) 2) average)))"))
+
+(define example-names (array string 4) (array-of string "Cheap products" "Tea by month" "Iberian cities" "Years"))
+
+(define source string "https://github.com/substrate-lang/sqlite-explorer")
+
+;; ---- queries ----
+
+(define (draft! [s (ptr explorer-state)] [text string])
+  (free (-> s draft bytes))
+  (set! (-> s draft) (string-copy text)))
+
+(define (talk-free! [s (ptr explorer-state)])
+  (when (-> s talking) (arena-free (& (-> s talk))))
+  (set! (-> s talking) #f)
+  (set! (-> s sql) "")
+  (set! (-> s problem) "")
+  (set! (-> s summary) "")
+  (result-free! (& (-> s result)))
+  (chart-free! (& (-> s chart))))
+
+(define (located [message datum] [blamed datum] [loc (ptr srcloc)]) -> string
+  (let ([text (datum->string message)] [at (if (== blamed 0) loc (syntax-srcloc blamed))] [b (make-buffer)])
+    (cond [(string-prefix? text "query: ") (set! text (slice text 7))]
+          [(string-prefix? text "read: ") (set! text (slice text 6))])
+    (unless (== at 0)
+      (buffer-add-string! (& b) "Line ")
+      (write-digits (& b) (cast u64 (-> at line)) 10)
+      (buffer-add-string! (& b) ", column ")
+      (write-digits (& b) (cast u64 (+ (-> at col) 1)) 10)
+      (buffer-add-string! (& b) ": "))
+    (buffer-add-string! (& b) text)
+    (buffer-string (& b))))
+
+(define (summary-text [r (ptr result)]) -> string
+  (let ([b (make-buffer)])
+    (write-digits (& b) (cast u64 (-> r total)) 10)
+    (buffer-add-string! (& b) (if (== (-> r total) 1) " row" " rows"))
+    (when (> (-> r total) (-> r count)) (buffer-add-string! (& b) ", the first 200 shown,"))
+    (if (< (-> r ms) 1.0)
+        (buffer-add-string! (& b) " in under 1 ms")
+        (begin (buffer-add-string! (& b) " in ") (write-number! (& b) (-> r ms)) (buffer-add-string! (& b) " ms")))
+    (buffer-string (& b))))
+
+(define (run! [s (ptr explorer-state)])
+  (talk-free! s)
+  (when (== (-> s db) 0) (return))
+  (set! (-> s talk) (make-arena))
+  (set! (-> s talking) #t)
+  (let ([a (& (-> s talk))])
+    (try (let ([forms (read-all (-> s draft) 'query)])
+           (cond [(null? forms) (set! (-> s problem) "Write a query, such as (from orders (limit 10)).")]
+                 [(pair? (cdr forms)) (set! (-> s problem) "Write one query at a time.")]
+                 [else
+                  (set! (-> s sql) (copy a (query-sql (car forms))))
+                  (result-run! (& (-> s result)) (-> s db) (-> s sql))
+                  (if (== (-> s result problem) "")
+                      (begin
+                        (chart-of! (& (-> s chart)) (& (-> s result)))
+                        (set! (-> s summary) (copy a (summary-text (& (-> s result))))))
+                      (set! (-> s problem) (-> s result problem)))]))
+         [catch compile-error (message blamed loc) (set! (-> s problem) (copy a (located message blamed loc)))])))
+
+(define (asked [s (ptr explorer-state)]) -> string
+  (match (-> s at)
+    [(ask f) (if (== (-> f q) 0) "" (@ (-> f q)))]
+    [_ ""]))
+
+(define (submit! [s (ptr explorer-state)])
+  (if (== (asked s) (-> s draft))
+      (run! s)
+      (navigate! (route-href (ask (ask-form #:q (& (-> s draft))))))))
+
+;; ---- the database ----
+
+(define (tables! [s (ptr explorer-state)])
+  (set! (-> s shelf) (make-arena))
+  (let* ([a (& (-> s shelf))] [all schema] [n (length all)] [b (make-buffer)] [count result])
+    (set! (-> s tables) (-> (new a table-info n) items))
+    (set! (-> s table-count) n)
+    (for ([i u32 0]) (< i n) (+= i 1)
+      (let* ([t (+ (-> s tables) i)] [name (symbol->string (car (car all)))] [columns (cdr (car all))]
+             [width (length columns)])
+        (set! (-> t id) i)
+        (set! (-> t name) (copy a name))
+        (set! (-> b length) 0)
+        (buffer-add-string! (& b) name)
+        (buffer-add-string! (& b) " · SQLite explorer")
+        (set! (-> t title) (copy a (buffer-string (& b))))
+        (set! (-> b length) 0)
+        (buffer-add-string! (& b) "(from ")
+        (buffer-add-string! (& b) name)
+        (buffer-add-string! (& b) "\n  (limit 50))")
+        (set! (-> t text) (copy a (buffer-string (& b))))
+        (set! (-> t columns) (-> (new a column-info width) items))
+        (set! (-> t width) width)
+        (for ([j u32 0]) (< j width) (+= j 1)
+          (let ([c (+ (-> t columns) j)])
+            (set! (-> c id) j)
+            (set! (-> c name) (copy a (symbol->string (car (car columns)))))
+            (set! (-> c type) (copy a (symbol->string (cadr (car columns)))))
+            (set! columns (cdr columns))))
+        (set! (-> b length) 0)
+        (buffer-add-string! (& b) "(from ")
+        (buffer-add-string! (& b) name)
+        (buffer-add-string! (& b) " (select (count)))")
+        (result-run! (& count) (-> s db) (query-sql (car (read-all (buffer-string (& b)) 'query))))
+        (set! (-> t size) (copy a (if (== (-> count count) 0) "" (-> count rows cells text))))
+        (set! (-> t few) (and (> (-> count count) 0) (<= (-> count rows cells value) 50.0)))
+        (result-free! (& count))
+        (set! all (cdr all))))
+    (buffer-free! (& b))))
+
+(define (table! [s (ptr explorer-state)] [name string])
+  (result-free! (& (-> s rows)))
+  (set! (-> s shown) 0)
+  (for ([i u32 0]) (< i (-> s table-count)) (+= i 1)
+    (when (== (-> (+ (-> s tables) i) name) name) (set! (-> s shown) (+ (-> s tables) i))))
+  (unless (== (-> s shown) 0)
+    (result-run! (& (-> s rows)) (-> s db) (query-sql (car (read-all (-> s shown text) 'query))))))
+
+;; ---- the component ----
+
+(define (arrived! [s (ptr explorer-state)] [to place])
+  (set! (-> s at) to)
+  (match to
+    [(ask f)
+     (if (== (-> f q) 0)
+         (talk-free! s)
+         (begin (draft! s (@ (-> f q))) (run! s)))]
+    [(table name) (table! s name)]
+    [_ (begin)]))
+
+(define (explorer-update [s (ptr explorer-state)] [m (ptr explorer-message)])
+  (match m
+    [(went to) (arrived! s to)]
+    [(edited text) (draft! s text)]
+    [(pressed key control meta) (when (and (== key "Enter") (or control meta)) (submit! s))]
+    [run (submit! s)]
+    [(example text) (navigate! (route-href (ask (ask-form #:q (& text)))))]))
+
+(define (explorer-init [s (ptr explorer-state)])
+  (let* ([why string] [db (shop-open! (& why))])
+    (set! (-> s draft) (string-copy (@ examples 0)))
+    (set! (-> s version) (string-copy (sqlite-version)))
+    (if (== db 0)
+        (set! (-> s failed) (string-copy why))
+        (begin
+          (set! (-> s db) db)
+          (board-run! (& (-> s board)) db)
+          (tables! s)))
+    (arrived! s (-> s at))))
+
+(define (at-query? [s (ptr explorer-state)]) -> bool (match (-> s at) [(ask f) #t] [_ #f]))
+
+(define (at-database? [s (ptr explorer-state)]) -> bool (match (-> s at) [database #t] [(table name) #t] [_ #f]))
+
+(define (showing? [s (ptr explorer-state)] [t (ptr table-info)]) -> bool
+  (match (-> s at) [(table name) (== name (-> t name))] [_ #f]))
+
+(define (table-title [s (ptr explorer-state)]) -> string
+  (if (== (-> s shown) 0) "Database · SQLite explorer" (-> s shown title)))
+
+(define (current [yes bool]) -> string (if yes "page" "false"))
+
+(view (query-page [s (ptr explorer-state)])
+  #:messages explorer-message
+  (section ([class "query"])
+    (h1 "Query")
+    (p ([class "lede"])
+       "Queries are written in a small query language, a Substrate DSL. This page turns each one into SQL and runs it "
+       "with SQLite, here in your browser.")
+    (textarea ([value (-> s draft)] [rows 8] [spellcheck "false"] [autocapitalize "off"] ["aria-label" "Query"]
+               [on input (edited (event value))] [on keydown (pressed (event key) (event control) (event meta))]))
+    (div ([class "actions"])
+      (button ([class "run"] [on click run]) "Run")
+      (span ([class "hint"]) "Ctrl+Enter or ⌘+Enter runs the query too."))
+    (div ([class "examples"])
+      (span "Examples:")
+      (button ([on click (example (@ examples 0))]) (text (@ example-names 0)))
+      (button ([on click (example (@ examples 1))]) (text (@ example-names 1)))
+      (button ([on click (example (@ examples 2))]) (text (@ example-names 2)))
+      (button ([on click (example (@ examples 3))]) (text (@ example-names 3))))
+    (when (!= (-> s problem) "") (p ([class "problem"]) (text (-> s problem))))
+    (when (!= (-> s sql) "") (div ([class "sql"]) (span "SQL") (pre (text (-> s sql)))))
+    (when (!= (-> s summary) "") (p ([class "summary"]) (text (-> s summary))))
+    (if (== (-> s chart kind) chart-bars)
+        (bar-chart (& (-> s chart)))
+        (when (== (-> s chart kind) chart-line) (line-chart (& (-> s chart)))))
+    (when (> (-> s result width) 0) (result-table (& (-> s result))))))
+
+(view (columns-view [t (ptr table-info)])
+  (ul ([class "columns"])
+    (each [c (-> t columns) (-> t width)] #:key (-> c id) (li (code (text (-> c name))) " " (span (text (-> c type)))))))
+
+(view (table-card [t (ptr table-info)])
+  (a ([class "table-card"] [href (route-href (table (-> t name)))])
+    (h2 (text (-> t name)))
+    (p (text (-> t size)) " rows")
+    (columns-view t)))
+
+(view (table-detail [s (ptr explorer-state)] [t (ptr table-info)])
+  (div ([class "detail"])
+    (p (text (-> t size)) " rows, in these columns:")
+    (columns-view t)
+    (p (if (-> t few) "Its rows, from this query:" "Its first 50 rows, from this query:"))
+    (pre (text (-> t text)))
+    (a ([class "open"] [href (route-href (ask (ask-form #:q (& (-> t text)))))]) "Open in the query page")
+    (result-table (& (-> s rows)))))
+
+(view (database-page [s (ptr explorer-state)])
+  (section ([class "database"])
+    (h1 "Database")
+    (p ([class "lede"]) "The shop's three tables, in SQLite in this page.")
+    (nav ([class "tabs"] [aria-label "Tables"])
+      (each [t (-> s tables) (-> s table-count)] #:key (-> t id)
+        (a ([href (route-href (table (-> t name)))] ["aria-current" (current (showing? s t))]) (text (-> t name)))))
+    (match (-> s at)
+      [(table name)
+       (if (== (-> s shown) 0)
+           (p "No table has this name. The tables are customers, products and orders.")
+           (table-detail s (-> s shown)))]
+      [_ (div ([class "overview"]) (each [t (-> s tables) (-> s table-count)] #:key (-> t id) (table-card t)))])))
+
+(define explorer-style string ".explorer {
+  --ground: #0a0d0b; --raised: #0e1310; --sunken: #070a08; --line: #1b241e; --line-strong: #2b372f; --ink: #dce6de;
+  --muted: #95a49a; --faint: #66756b; --green: #4ade80; --green-soft: #86efac; --on-green: #04130a; --red: #f87171;
+  --sans: ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif;
+  --mono: ui-monospace, \"SF Mono\", \"JetBrains Mono\", \"Cascadia Code\", Menlo, Consolas, \"Liberation Mono\", monospace;
+  min-height: 100vh; display: flex; flex-direction: column; background: var(--ground); color: var(--ink);
+  font: 15px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+.explorer a { color: inherit; }
+.explorer :focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.explorer .bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 24px;
+  width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 24px; box-sizing: border-box; }
+.explorer .top { position: sticky; top: 0; z-index: 10; background: rgba(10, 13, 11, 0.82);
+  border-bottom: 1px solid var(--line); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+.explorer .top .bar { min-height: 60px; }
+.explorer .brand { display: flex; align-items: center; gap: 12px; }
+.explorer .wordmark { display: inline-flex; align-items: center; gap: 0.5em; color: var(--green); text-decoration: none;
+  font: 700 16px/1 \"Substrate Wordmark\", var(--mono); letter-spacing: -0.01em; }
+.explorer .mark { position: relative; flex: none; width: 1.875em; height: 1.875em;
+  background: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2 2 28 28'%3E%3Cpath d='M9.5 6.5Q4.5 16 9.5 25.5M22.5 6.5Q27.5 16 22.5 25.5' fill='none' stroke='%234ade80' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E\") center / contain no-repeat; }
+.explorer .mark-cursor { position: absolute; left: 37.5%; top: 26.786%; width: 25%; height: 46.429%;
+  border-radius: 0.067em; background: var(--green); }
+.explorer .slash { color: var(--line-strong); font: 300 20px/1 var(--sans); }
+.explorer .app { color: var(--ink); font: 600 14px/1 var(--mono); text-decoration: none; }
+.explorer .top nav { display: flex; flex-wrap: wrap; gap: 24px; font: 500 13px/1 var(--mono); }
+.explorer .top nav a { color: var(--muted); text-decoration: none; }
+.explorer .top nav a:hover, .explorer .top nav a[aria-current=page] { color: var(--ink); }
+.explorer main { flex: 1; width: 100%; max-width: 1120px; margin: 0 auto; padding: 40px 24px 56px;
+  box-sizing: border-box; }
+.explorer .foot { border-top: 1px solid var(--line); }
+.explorer .foot .bar { min-height: 88px; padding-top: 20px; padding-bottom: 20px; }
+.explorer .foot p { margin: 0; color: var(--faint); font-size: 13px; }
+.explorer .more { color: var(--green); font: 12px/1 var(--mono); text-decoration: none; }
+.explorer a.more:hover { text-decoration: underline; }
+.explorer h1 { margin: 0 0 10px; font: 700 30px/1.15 var(--sans); letter-spacing: -0.02em; }
+.explorer h2 { margin: 0 0 14px; font: 600 15px/1.3 var(--sans); }
+.explorer .lede { margin: 0 0 28px; max-width: 46em; color: var(--muted); font-size: 16px; line-height: 1.6; }
+.explorer pre, .explorer code { font: 13px/1.5 var(--mono); }
+.explorer pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.figures { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.figure { padding: 16px 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); }
+.figure span { display: block; color: var(--muted); font: 12px/1.4 var(--mono); text-transform: capitalize; }
+.figure strong { font: 600 26px/1.3 var(--sans); }
+.panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.panel { display: flex; flex-direction: column; padding: 20px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--raised); }
+.panel details { margin-top: auto; padding-top: 14px; }
+.explorer summary { cursor: pointer; color: var(--muted); font: 12px/1.4 var(--mono); }
+.panel details pre { margin-top: 8px; padding: 12px; border-radius: 8px; background: var(--sunken); }
+.explorer .open { display: inline-block; margin-top: 10px; color: var(--green); font: 500 13px/1.4 var(--mono);
+  text-decoration: none; }
+.explorer .open:hover { text-decoration: underline; }
+.chart { display: block; width: 100%; max-width: 440px; height: auto; }
+.chart .label { fill: var(--muted); font: 13px var(--mono); }
+.chart .value { fill: var(--ink); font: 13px var(--mono); }
+.chart rect, .chart circle { fill: var(--green); }
+.chart .trace { fill: none; stroke: var(--green); stroke-width: 2; stroke-linejoin: round; }
+.chart .axis { stroke: var(--line-strong); }
+.table { overflow-x: auto; }
+.explorer table { width: 100%; border-collapse: collapse; font: 13px/1.5 var(--mono); }
+.explorer th { padding: 6px 10px; border-bottom: 1px solid var(--line-strong); color: var(--muted); font-weight: 500;
+  text-align: left; white-space: nowrap; }
+.explorer td { padding: 5px 10px; border-bottom: 1px solid var(--line); }
+.explorer th.number, .explorer td.number { text-align: right; }
+.query textarea { display: block; width: 100%; box-sizing: border-box; padding: 12px 14px; resize: vertical;
+  font: 14px/1.55 var(--mono); color: var(--ink); background: var(--sunken); border: 1px solid var(--line-strong);
+  border-radius: 8px; }
+.query textarea:focus { outline: 2px solid var(--green); outline-offset: -1px; }
+.query .actions, .query .examples { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.explorer button { font: 500 13px/1 var(--mono); padding: 8px 12px; border: 1px solid var(--line-strong);
+  border-radius: 6px; color: var(--ink); background: transparent; cursor: pointer; }
+.explorer button:hover { border-color: var(--green); color: var(--green); }
+.explorer button.run { background: var(--green); border-color: var(--green); color: var(--on-green); }
+.explorer button.run:hover { background: var(--green-soft); border-color: var(--green-soft); }
+.query .hint, .query .examples span { color: var(--faint); font-size: 13px; }
+.query .problem { color: var(--red); font-family: var(--mono); font-size: 13px; }
+.query .sql { margin: 16px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--raised); }
+.query .sql span { display: block; margin-bottom: 4px; color: var(--faint); font: 12px var(--mono); }
+.query .summary { color: var(--muted); font-size: 13px; }
+.query .chart { margin: 8px 0 16px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 24px; border-bottom: 1px solid var(--line); }
+.tabs a { margin-bottom: -1px; padding: 10px 14px; border-bottom: 2px solid transparent; color: var(--muted);
+  font: 500 13px/1 var(--mono); text-decoration: none; }
+.tabs a:hover { color: var(--ink); }
+.tabs a[aria-current=page] { color: var(--ink); border-bottom-color: var(--green); }
+.overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.table-card { display: block; padding: 20px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--raised); text-decoration: none; }
+.table-card:hover { border-color: var(--green); }
+.table-card h2 { margin: 0 0 2px; color: var(--green); font: 600 16px/1.3 var(--mono); }
+.table-card p { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+.columns { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; padding: 0; list-style: none; }
+.columns span { color: var(--faint); font-size: 13px; }
+.detail > p { margin: 0 0 10px; color: var(--muted); }
+.detail .columns { margin-bottom: 20px; }
+.detail pre { padding: 12px; border-radius: 8px; background: var(--raised); }
+.detail .table { margin-top: 20px; }
+@media (max-width: 760px) {
+  .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .panels, .overview { grid-template-columns: minmax(0, 1fr); }
+  .chart .label, .chart .value { font-size: 16px; }
+  .explorer .top .bar { padding-top: 14px; padding-bottom: 14px; }
+  .explorer .top nav { gap: 18px; }
+}")
+
+(component (explorer)
+  #:state [s explorer-state]
+  #:messages explorer-message
+  #:update explorer-update
+  #:init explorer-init
+  #:route went
+  #:style explorer-style
+  (div ([class "explorer"])
+    (header ([class "top"])
+      (div ([class "bar"])
+        (div ([class "brand"])
+          (a ([class "wordmark"] [href "/"])
+            (span ([class "mark"] [aria-hidden "true"]) (span ([class "mark-cursor"])))
+            "substrate")
+          (span ([class "slash"] [aria-hidden "true"]) "/")
+          (a ([class "app"] [href (route-href dashboard)]) "SQLite explorer"))
+        (nav ([aria-label "Explorer"])
+          (a ([href (route-href dashboard)] ["aria-current" (current (route-current? dashboard))]) "Dashboard")
+          (a ([href (route-href (ask (ask-form #:q 0)))] ["aria-current" (current (at-query? s))]) "Query")
+          (a ([href (route-href database)] ["aria-current" (current (at-database? s))]) "Database")
+          (a ([href source]) "GitHub ↗"))))
+    (main
+      (if (!= (-> s failed) "")
+          (p ([class "problem"]) "The shop's database could not be made: " (text (-> s failed)))
+          (match (-> s at)
+            [dashboard (title "SQLite explorer") (dashboard-page (& (-> s board)))]
+            [(ask f) (title "Query · SQLite explorer") (query-page s)]
+            [database (title "Database · SQLite explorer") (database-page s)]
+            [(table name) (title (table-title s)) (database-page s)]
+            [lost
+             (title "Not found · SQLite explorer")
+             (section (h1 "Not found") (p "No page is at this address. " (a ([href (route-href dashboard)]) "The dashboard")
+                                          " has the shop's figures."))])))
+    (footer ([class "foot"])
+      (div ([class "bar"])
+        (p "SQLite " (text (-> s version)) " runs in this page, compiled to WebAssembly. The shop and its data are made up.")
+        (a ([class "more"] [href source]) "Source on GitHub ↗")))))

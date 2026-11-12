@@ -1,0 +1,4 @@
+;; A query that sql compiles, with a misspelled table, reported at the table.
+(require-unqualified "../../sql.sub")
+
+(define (main) (printf "~a\n" (-> (sql (from oders (limit 3))) sql)))

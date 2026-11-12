@@ -1,0 +1,276 @@
+;; The query language: query-sql turns (from table clause ...) into SQL and raises a syntax error at the first part it
+;; refuses. The dashboard's queries go through it when the program compiles (dashboard.sub). The query page's queries
+;; go through it when they run.
+(require-unqualified compiler/macros)
+(require-unqualified std/string)
+(require-unqualified "schema.sub")
+
+(provide query-sql query-text)
+
+(struct parts [tables datum] [joins datum] [where datum] [group datum] [having datum] [select datum] [order datum]
+  [limit datum] [aliases datum])
+
+;; (word kind sql fewest most usage)
+(define operators datum
+  '((= infix "=" 2 2 "(= a b)") (!= infix "<>" 2 2 "(!= a b)") (< infix "<" 2 2 "(< a b)") (<= infix "<=" 2 2 "(<= a b)")
+    (> infix ">" 2 2 "(> a b)") (>= infix ">=" 2 2 "(>= a b)")
+    (and infix "AND" 2 99 "(and condition condition ...)") (or infix "OR" 2 99 "(or condition condition ...)")
+    (not prefix "NOT" 1 1 "(not condition)")
+    (+ infix "+" 2 99 "(+ a b ...)") (* infix "*" 2 99 "(* a b ...)") (/ infix "/" 2 2 "(/ a b)")
+    (- minus "-" 1 2 "(- a b) or (- a)")
+    (like infix "LIKE" 2 2 "(like text pattern)") (in in "IN" 2 99 "(in value choice ...)")
+    (between between "BETWEEN" 3 3 "(between value low high)")
+    (count count "COUNT" 0 1 "(count) or (count value)")
+    (sum call "SUM" 1 1 "(sum value)") (avg call "AVG" 1 1 "(avg value)") (min call "MIN" 1 1 "(min value)")
+    (max call "MAX" 1 1 "(max value)") (round call "ROUND" 1 2 "(round value) or (round value digits)")
+    (lower call "LOWER" 1 1 "(lower text)") (upper call "UPPER" 1 1 "(upper text)")
+    (length call "LENGTH" 1 1 "(length text)") (abs call "ABS" 1 1 "(abs number)")
+    (month date "%Y-%m" 1 1 "(month date)") (year date "%Y" 1 1 "(year date)")))
+
+(define (refuse [at datum] [message string]) (raise-syntax-error 'query message at))
+
+(define (refuse-with [at datum] [template string] [args datum]) (refuse at (format-message template args)))
+
+(define (named? [x datum] [name datum]) -> bool (and (identifier? x) (== (syntax-e x) name)))
+
+(define (form-of [x datum]) -> datum
+  (let ([l (syntax->list x)]) (if (and (!= l 0) (pair? l) (identifier? (car l))) l 0)))
+
+(define (written [x datum]) -> string (format-message "~s" `(,(syntax->datum x))))
+
+(define (table! [x datum])
+  (unless (and (identifier? x) (!= (schema-columns (syntax-e x)) 0))
+    (refuse-with x "unknown table ~s: the tables are customers, products and orders" `(,(syntax->datum x)))))
+
+(define (expect! [x datum] [ok bool] [usage string])
+  (unless ok (refuse-with x "expected ~a" `(,(string->datum usage)))))
+
+(define (once! [c datum] [had datum])
+  (unless (== had 0) (refuse-with c "a query has one ~a clause" `(,(syntax-e (car (syntax->list c)))))))
+
+;; ---- clauses ----
+
+(define (clause! [p (ptr parts)] [c datum])
+  (let ([l (form-of c)])
+    (when (== l 0)
+      (refuse c "expected a clause: join, where, group, having, select, order or limit, as (where condition)"))
+    (let ([word (syntax-e (car l))] [n (length (cdr l))])
+      (cond [(== word 'join)
+             (expect! c (== n 2) "(join table condition)")
+             (table! (cadr l))
+             (unless (== (memq (syntax-e (cadr l)) (-> p tables)) 0) (refuse (cadr l) "this table is in the query already"))
+             (set! (-> p tables) (append (-> p tables) (cons (syntax-e (cadr l)) nil)))
+             (set! (-> p joins) (append (-> p joins) (cons c nil)))]
+            [(== word 'where) (once! c (-> p where)) (expect! c (== n 1) "(where condition)") (set! (-> p where) (cadr l))]
+            [(== word 'group) (once! c (-> p group)) (expect! c (>= n 1) "(group value ...)") (set! (-> p group) c)]
+            [(== word 'having)
+             (once! c (-> p having))
+             (expect! c (== n 1) "(having condition)")
+             (set! (-> p having) (cadr l))]
+            [(== word 'select) (once! c (-> p select)) (expect! c (>= n 1) "(select value ...)") (set! (-> p select) c)]
+            [(== word 'order) (once! c (-> p order)) (expect! c (>= n 1) "(order value ...)") (set! (-> p order) c)]
+            [(== word 'limit)
+             (once! c (-> p limit))
+             (expect! c (and (== n 1) (integer? (syntax-e (cadr l)))) "(limit n), where n is a whole number")
+             (let ([v (integer-value (syntax-e (cadr l)))])
+               (unless (and (>= v 1) (<= v 10000)) (refuse (cadr l) "a limit is from 1 to 10000")))
+             (set! (-> p limit) (cadr l))]
+            [else
+             (refuse-with (car l) "unknown clause ~a: the clauses are join, where, group, having, select, order and limit"
+                          `(,word))]))))
+
+(define (aliases! [p (ptr parts)])
+  (unless (== (-> p select) 0)
+    (let ([items (cdr (syntax->list (-> p select)))])
+      (while (pair? items)
+        (let ([l (form-of (car items))])
+          (when (and (!= l 0) (named? (car l) 'as))
+            (expect! (car items) (and (== (length l) 3) (identifier? (caddr l))) "(as value name)")
+            (set! (-> p aliases) (cons (syntax-e (caddr l)) (-> p aliases)))))
+        (set! items (cdr items))))))
+
+;; ---- values ----
+
+(define (quoted! [b (ptr buffer)] [s string] [mark u8])
+  (buffer-add-byte! b (cast i32 mark))
+  (for ([i u32 0]) (< i (-> s length)) (+= i 1)
+    (when (== (@ s i) mark) (buffer-add-byte! b (cast i32 mark)))
+    (buffer-add-byte! b (cast i32 (@ s i))))
+  (buffer-add-byte! b (cast i32 mark)))
+
+(define (column! [b (ptr buffer)] [p (ptr parts)] [x datum] [aliased bool])
+  (let* ([word (syntax-e x)] [name (symbol->string word)] [dot (string-index name #\.)])
+    (cond [(< dot (-> name length))
+           (let ([table (string->symbol (slice name 0 dot))] [column (string->symbol (slice name (+ dot 1)))])
+             (when (== (memq table (-> p tables)) 0) (refuse-with x "~a is not a table of this query" `(,table)))
+             (unless (schema-has? table column) (refuse-with x "the table ~a has no column ~a" `(,table ,column)))
+             (buffer-add-string! b name))]
+          [(and aliased (!= (memq word (-> p aliases)) 0)) (quoted! b name #\")]
+          [else
+           (let ([tables (-> p tables)] [found datum 0])
+             (while (pair? tables)
+               (when (schema-has? (car tables) word)
+                 (unless (== found 0)
+                   (refuse-with x "both ~a and ~a have a column ~a: write ~a.~a or ~a.~a"
+                                `(,found ,(car tables) ,word ,found ,word ,(car tables) ,word)))
+                 (set! found (car tables)))
+               (set! tables (cdr tables)))
+             (when (== found 0) (refuse-with x "no table of this query has a column ~a" `(,word)))
+             (buffer-add-string! b name))])))
+
+(define (value! [b (ptr buffer)] [p (ptr parts)] [x datum] [aliased bool])
+  (let ([d (syntax-e x)])
+    (cond [(identifier? x) (column! b p x aliased)]
+          [(string? d) (quoted! b (datum->string d) #\')]
+          [(or (integer? d) (flonum? d)) (buffer-add-string! b (format-message "~a" `(,d)))]
+          [else
+           (let ([l (form-of x)])
+             (when (== l 0) (refuse x "expected a value: a column, a number, text in quotes, or (operator value ...)"))
+             (operation! b p x l aliased))])))
+
+(define (values! [b (ptr buffer)] [p (ptr parts)] [xs datum] [between string] [aliased bool])
+  (let ([first #t])
+    (while (pair? xs)
+      (unless first (buffer-add-string! b between))
+      (set! first #f)
+      (value! b p (car xs) aliased)
+      (set! xs (cdr xs)))))
+
+(define (operation! [b (ptr buffer)] [p (ptr parts)] [x datum] [l datum] [aliased bool])
+  (let* ([word (syntax-e (car l))] [op (assq word operators)] [args (cdr l)] [n (length args)])
+    (cond [(== word 'as) (refuse x "as names a value in select: (select (as value name))")]
+          [(or (== word 'desc) (== word 'asc)) (refuse x "desc and asc go in order: (order (desc value))")]
+          [(== op 0) (refuse-with (car l) "unknown operator ~a" `(,word))])
+    (let ([kind (list-ref op 1)] [sql (datum->string (list-ref op 2))])
+      (expect! x (and (>= n (integer-value (list-ref op 3))) (<= n (integer-value (list-ref op 4))))
+               (datum->string (list-ref op 5)))
+      (cond [(== kind 'infix)
+             (buffer-add-byte! b #\()
+             (values! b p args (format-message " ~a " `(,(string->datum sql))) aliased)
+             (buffer-add-byte! b #\))]
+            [(== kind 'minus)
+             (buffer-add-byte! b #\()
+             (if (== n 1)
+                 (begin (buffer-add-byte! b #\-) (value! b p (car args) aliased))
+                 (values! b p args " - " aliased))
+             (buffer-add-byte! b #\))]
+            [(== kind 'prefix)
+             (buffer-add-byte! b #\()
+             (buffer-add-string! b sql)
+             (buffer-add-byte! b #\space)
+             (value! b p (car args) aliased)
+             (buffer-add-byte! b #\))]
+            [(== kind 'in)
+             (buffer-add-byte! b #\()
+             (value! b p (car args) aliased)
+             (buffer-add-string! b " IN (")
+             (values! b p (cdr args) ", " aliased)
+             (buffer-add-string! b "))")]
+            [(== kind 'between)
+             (buffer-add-byte! b #\()
+             (value! b p (car args) aliased)
+             (buffer-add-string! b " BETWEEN ")
+             (value! b p (cadr args) aliased)
+             (buffer-add-string! b " AND ")
+             (value! b p (caddr args) aliased)
+             (buffer-add-byte! b #\))]
+            [(and (== kind 'count) (== n 0)) (buffer-add-string! b "COUNT(*)")]
+            [(== kind 'date)
+             (buffer-add-string! b "strftime(")
+             (quoted! b sql #\')
+             (buffer-add-string! b ", ")
+             (value! b p (car args) aliased)
+             (buffer-add-byte! b #\))]
+            [else
+             (buffer-add-string! b sql)
+             (buffer-add-byte! b #\()
+             (values! b p args ", " aliased)
+             (buffer-add-byte! b #\))]))))
+
+(define (items! [b (ptr buffer)] [p (ptr parts)] [items datum])
+  (let ([first #t])
+    (while (pair? items)
+      (unless first (buffer-add-string! b ", "))
+      (set! first #f)
+      (let* ([x (car items)] [l (form-of x)])
+        (cond [(and (!= l 0) (named? (car l) 'as))
+               (value! b p (cadr l) #f)
+               (buffer-add-string! b " AS ")
+               (quoted! b (symbol->string (syntax-e (caddr l))) #\")]
+              [(identifier? x) (value! b p x #f)]
+              [else
+               (value! b p x #f)
+               (buffer-add-string! b " AS ")
+               (quoted! b (written x) #\")]))
+      (set! items (cdr items)))))
+
+(define (keys! [b (ptr buffer)] [p (ptr parts)] [keys datum])
+  (let ([first #t])
+    (while (pair? keys)
+      (unless first (buffer-add-string! b ", "))
+      (set! first #f)
+      (let* ([x (car keys)] [l (form-of x)])
+        (if (and (!= l 0) (or (named? (car l) 'desc) (named? (car l) 'asc)))
+            (begin
+              (expect! x (== (length l) 2) "(desc value) or (asc value)")
+              (value! b p (cadr l) #t)
+              (buffer-add-string! b (if (named? (car l) 'desc) " DESC" " ASC")))
+            (value! b p x #t)))
+      (set! keys (cdr keys)))))
+
+;; ---- queries ----
+
+(define (query-sql [q datum]) -> string
+  (let ([l (form-of q)] [p parts] [b (make-buffer)])
+    (expect! q (and (!= l 0) (named? (car l) 'from) (pair? (cdr l))) "a query, (from table clause ...)")
+    (table! (cadr l))
+    (set! (-> p tables) (cons (syntax-e (cadr l)) nil))
+    (set! (-> p joins) nil)
+    (set! (-> p aliases) nil)
+    (let ([clauses (cddr l)])
+      (while (pair? clauses)
+        (clause! (& p) (car clauses))
+        (set! clauses (cdr clauses))))
+    (aliases! (& p))
+    (buffer-add-string! (& b) "SELECT ")
+    (if (== (-> p select) 0)
+        (buffer-add-byte! (& b) #\*)
+        (items! (& b) (& p) (cdr (syntax->list (-> p select)))))
+    (buffer-add-string! (& b) " FROM ")
+    (buffer-add-string! (& b) (symbol->string (syntax-e (cadr l))))
+    (let ([joins (-> p joins)])
+      (while (pair? joins)
+        (let ([j (syntax->list (car joins))])
+          (buffer-add-string! (& b) " JOIN ")
+          (buffer-add-string! (& b) (symbol->string (syntax-e (cadr j))))
+          (buffer-add-string! (& b) " ON ")
+          (value! (& b) (& p) (caddr j) #f))
+        (set! joins (cdr joins))))
+    (unless (== (-> p where) 0)
+      (buffer-add-string! (& b) " WHERE ")
+      (value! (& b) (& p) (-> p where) #f))
+    (unless (== (-> p group) 0)
+      (buffer-add-string! (& b) " GROUP BY ")
+      (values! (& b) (& p) (cdr (syntax->list (-> p group))) ", " #t))
+    (unless (== (-> p having) 0)
+      (buffer-add-string! (& b) " HAVING ")
+      (value! (& b) (& p) (-> p having) #t))
+    (unless (== (-> p order) 0)
+      (buffer-add-string! (& b) " ORDER BY ")
+      (keys! (& b) (& p) (cdr (syntax->list (-> p order)))))
+    (unless (== (-> p limit) 0)
+      (buffer-add-string! (& b) " LIMIT ")
+      (value! (& b) (& p) (-> p limit) #f))
+    (buffer-string (& b))))
+
+(define (query-text [q datum]) -> string
+  (let ([l (syntax->list q)] [b (make-buffer)])
+    (buffer-add-string! (& b) "(from ")
+    (buffer-add-string! (& b) (written (cadr l)))
+    (let ([clauses (cddr l)])
+      (while (pair? clauses)
+        (buffer-add-string! (& b) "\n  ")
+        (buffer-add-string! (& b) (written (car clauses)))
+        (set! clauses (cdr clauses))))
+    (buffer-add-byte! (& b) #\))
+    (buffer-string (& b))))

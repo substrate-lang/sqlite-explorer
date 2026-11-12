@@ -1,0 +1,6 @@
+;; The explorer as a site of its own.
+(require-unqualified web-ui)
+(require-unqualified "routes.sub")
+(require-unqualified "explorer.sub")
+
+(attach #:routes place ["root" (explorer)])

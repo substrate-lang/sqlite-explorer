@@ -1,0 +1,107 @@
+;; The explorer in Chromium: the dashboard, the query page with its SQL, results, charts and errors, queries from URLs,
+;; the database page and its tables, the links out, and the page for a path that no route takes.
+(require-unqualified std/test/browser)
+(require-unqualified std/test/test)
+(require-unqualified std/string)
+(require server "support/server.sub")
+
+(define (typed [b browser] [query string])
+  (browser-click! b (by-css "textarea"))
+  (browser-press! b "Control+a")
+  (browser-type! b (by-css "textarea") query))
+
+(define (asked [b browser] [query string])
+  (typed b query)
+  (browser-click! b (by-role "button" "Run")))
+
+(test dashboard
+  (with-browser (b "explorer")
+    (expect-text b (by-css "h1") "Example shop dashboard")
+    (expect-text b (nth (by-css ".figure strong") 1) "2557")
+    (expect-text b (nth (by-css ".figure strong") 2) "59,655")
+    (expect-text b (nth (by-css ".figure strong") 4) "320")
+    (expect-count b (by-css ".panel") 4)
+    (expect-count b (by-css ".panel circle") 24)
+    (expect-count b (by-css ".panel rect") 21)
+    (expect-count b (by-css ".panel tbody tr") 8)
+    (expect-equal (browser-console b) "")))
+
+(test query
+  (with-browser (b "explorer")
+    (browser-click! b (by-role "link" "Query"))
+    (expect-text b (by-css "h1") "Query")
+    (asked b "(from products (where (> price 30)) (select name price) (order (desc price)))")
+    (expect-text b (by-css ".sql pre") "SELECT name, price FROM products WHERE (price > 30) ORDER BY price DESC")
+    (expect-count b (by-css ".query tbody tr") 4)
+    (expect-text b (nth (by-css ".query tbody td") 1) "Burr grinder")
+    (expect (string-contains? (browser-url b) "/query/?q=%28from+products"))
+    (typed b "(from products (where (> price 40)))")
+    (browser-press! b "Control+Enter")
+    (expect-count b (by-css ".query tbody tr") 2)
+    (browser-back! b)
+    (expect-count b (by-css ".query tbody tr") 4)))
+
+(test query-charts
+  (with-browser (b "explorer")
+    (browser-click! b (by-role "link" "Query"))
+    (asked b "(from products (group category) (select category (as (count) products)))")
+    (expect-count b (by-css ".query rect") 4)
+    (asked b "(from orders (group (month date)) (select (as (month date) month) (count)))")
+    (expect-count b (by-css ".query circle") 24)
+    (expect-count b (by-css ".query rect") 0)))
+
+(test query-errors
+  (with-browser (b "explorer")
+    (browser-click! b (by-role "link" "Query"))
+    (asked b "(from orders (where (> totl 3)))")
+    (expect-text b (by-css ".problem") "Line 1, column 24: no table of this query has a column totl")
+    (asked b "(from orders (select (sum)))")
+    (expect-text b (by-css ".problem") "Line 1, column 22: expected (sum value)")
+    (asked b "(from orders (where (> total 3))")
+    (expect-text b (by-css ".problem") "Line 1, column 1: unterminated list")
+    (expect-missing b (by-css ".sql"))))
+
+(test examples
+  (with-browser (b "explorer")
+    (browser-click! b (by-role "link" "Query"))
+    (browser-click! b (by-role "button" "Cheap products"))
+    (expect-count b (by-css ".query tbody tr") 6)
+    (browser-click! b (by-role "button" "Tea by month"))
+    (expect-count b (by-css ".query circle") 24)))
+
+(test open-panel
+  (with-browser (b "explorer")
+    (browser-click! b (nth (by-role "link" "Open in the query page") 3))
+    (expect-text b (by-css "h1") "Query")
+    (expect-count b (by-css ".query rect") 10)))
+
+(test database
+  (with-browser (b "explorer")
+    (browser-click! b (by-role "link" "Database"))
+    (expect-text b (by-css "h1") "Database")
+    (expect-count b (by-css ".table-card") 3)
+    (expect-text b (nth (by-css ".table-card p") 3) "2557 rows")
+    (browser-click! b (by-role "link" "orders"))
+    (expect-attribute b (by-role "link" "orders") "aria-current" "page")
+    (expect-count b (by-css ".detail .columns li") 6)
+    (expect-count b (by-css ".detail tbody tr") 50)
+    (browser-click! b (by-role "link" "Open in the query page"))
+    (expect-text b (by-css ".sql pre") "SELECT * FROM orders LIMIT 50")))
+
+(test links
+  (with-browser (b "explorer")
+    (expect-attribute b (by-role "link" "substrate") "href" "/")
+    (expect-attribute b (by-role "link" "GitHub ↗") "href" "https://github.com/substrate-lang/sqlite-explorer")
+    (expect-attribute b (by-role "link" "Source on GitHub ↗") "href" "https://github.com/substrate-lang/sqlite-explorer")))
+
+(test query-url #:grants ((net "127.0.0.1"))
+  (with-browser (b "explorer" #:server server:main #:url "query/?q=(from%20products%20(limit%203))")
+    (expect-text b (by-css ".sql pre") "SELECT * FROM products LIMIT 3")
+    (expect-count b (by-css ".query tbody tr") 3)
+    (expect-value b (by-css "textarea") "(from products (limit 3))")))
+
+(test elsewhere #:grants ((net "127.0.0.1"))
+  (with-browser (b "explorer" #:server server:main #:url "database/nope/")
+    (expect-count b (by-text "No table has this name. The tables are customers, products and orders.") 1)
+    (browser-go! b "nope/")
+    (expect-text b (by-css "h1") "Not found")))

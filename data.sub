@@ -1,0 +1,149 @@
+;; The shop's data, made from a fixed seed so that every visitor sees the same: products, customers and two years of
+;; orders, in a database in memory.
+(require-unqualified sqlite)
+(require-unqualified "schema.sub")
+
+(provide shop-open!)
+
+(define seed u32 2463534242)
+
+(define (next!) -> u32
+  (set! seed (bit-xor seed (<< seed 13)))
+  (set! seed (bit-xor seed (>> seed 17)))
+  (set! seed (bit-xor seed (<< seed 5)))
+  seed)
+
+(define (below [n u32]) -> u32 (% (next!) n))
+
+(define (chance) -> f64 (/ (cast f64 (below 10000)) 10000.0))
+
+(define product-names (array string 24)
+  (array-of string "House blend" "Ethiopia Guji" "Colombia Huila" "Kenya Nyeri" "Sumatra decaf" "Espresso blend"
+            "Sencha" "Assam" "Earl Grey" "Chamomile" "Jasmine pearls" "Rooibos"
+            "Pour-over dripper" "Gooseneck kettle" "Burr grinder" "French press" "Moka pot" "Scale"
+            "Paper filters" "Travel mug" "Ceramic cup" "Cleaning tablets" "Tea strainer" "Gift card"))
+
+(define prices (array f64 24)
+  (array-of f64 14.0 18.5 16.0 19.0 15.0 15.5 12.0 9.5 10.0 8.5 16.0 9.0 24.0 48.0 120.0 32.0 36.0 28.0 6.0 22.0 14.0
+            9.0 7.5 25.0))
+
+(define categories (array string 4) (array-of string "Coffee" "Tea" "Gear" "Supplies"))
+
+;; Each category's share of the orders, in percent: coffee, tea, gear and supplies.
+(define shares (array u32 4) (array-of u32 46 26 10 18))
+
+(define cities (array string 16)
+  (array-of string "Lisbon" "Porto" "Madrid" "Barcelona" "Paris" "Lyon" "Berlin" "Hamburg" "Amsterdam" "Utrecht"
+            "Dublin" "Copenhagen" "Oslo" "Milan" "Vienna" "Prague"))
+
+(define countries (array string 16)
+  (array-of string "Portugal" "Portugal" "Spain" "Spain" "France" "France" "Germany" "Germany" "Netherlands"
+            "Netherlands" "Ireland" "Denmark" "Norway" "Italy" "Austria" "Czechia"))
+
+(define city-weights (array u32 16) (array-of u32 9 5 8 7 9 4 10 5 7 3 5 4 3 6 4 3))
+
+(define first-names (array string 24)
+  (array-of string "Ana" "Ben" "Carla" "Daniel" "Elena" "Felix" "Greta" "Hugo" "Ines" "Jonas" "Klara" "Luis" "Maya"
+            "Nils" "Olivia" "Pablo" "Rosa" "Sami" "Tomas" "Ursula" "Vera" "Wim" "Yara" "Zoe"))
+
+(define last-names (array string 24)
+  (array-of string "Almeida" "Berger" "Costa" "Dubois" "Eriksen" "Fischer" "Garcia" "Hansen" "Ivanova" "Jansen"
+            "Keller" "Lopez" "Moreau" "Novak" "Olsen" "Petrov" "Quinn" "Rossi" "Silva" "Thomsen" "Ueda" "Varga"
+            "Weber" "Young"))
+
+;; Each month's orders relative to the year's average, from January.
+(define seasons (array f64 12) (array-of f64 0.8 0.85 0.95 1.0 1.0 0.9 0.85 0.8 1.0 1.05 1.25 1.6))
+
+(define (weighted [weights (slice u32)]) -> u32
+  (let ([total u32 0] [r u32 0])
+    (for ([i u32 0]) (< i (-> weights length)) (+= i 1) (+= total (@ weights i)))
+    (set! r (below total))
+    (for ([i u32 0]) (< i (-> weights length)) (+= i 1)
+      (when (< r (@ weights i)) (return i))
+      (-= r (@ weights i)))
+    0))
+
+(define (two-digits! [b (ptr buffer)] [n u32])
+  (buffer-add-byte! b (cast i32 (+ #\0 (/ n 10))))
+  (buffer-add-byte! b (cast i32 (+ #\0 (% n 10)))))
+
+(define (date-text [b (ptr buffer)] [year u32] [month u32] [day u32]) -> string
+  (set! (-> b length) 0)
+  (write-digits b (cast u64 year) 10)
+  (buffer-add-byte! b #\-)
+  (two-digits! b month)
+  (buffer-add-byte! b #\-)
+  (two-digits! b day)
+  (buffer-string b))
+
+(define (days-in [year u32] [month u32]) -> u32
+  (case month
+    [(2) (if (== (% year 4) 0) 29 28)]
+    [(4 6 9 11) 30]
+    [else 31]))
+
+(define (stepped! [st (ptr sqlite-statement)] [err (ptr string)]) -> bool
+  (let ([done (== (sqlite-step st err) sqlite-done)])
+    (sqlite-reset st)
+    done))
+
+(define (products! [db (ptr sqlite)] [err (ptr string)]) -> bool
+  (let ([st (sqlite-prepare db "INSERT INTO products VALUES (?, ?, ?, ?)" err)] [ok #t])
+    (when (== st 0) (return #f))
+    (for ([i u32 0]) (and ok (< i 24)) (+= i 1)
+      (sqlite-bind! st 1 (+ i 1))
+      (sqlite-bind! st 2 (@ product-names i))
+      (sqlite-bind! st 3 (@ categories (/ i 6)))
+      (sqlite-bind! st 4 (@ prices i))
+      (set! ok (stepped! st err)))
+    (sqlite-finalize st)
+    ok))
+
+(define (customers! [db (ptr sqlite)] [err (ptr string)] [count u32]) -> bool
+  (let ([st (sqlite-prepare db "INSERT INTO customers VALUES (?, ?, ?, ?)" err)] [name (make-buffer)] [ok #t])
+    (when (== st 0) (return #f))
+    (for ([i u32 0]) (and ok (< i count)) (+= i 1)
+      (let ([city (weighted (slice city-weights))])
+        (set! (-> name length) 0)
+        (buffer-add-string! (& name) (@ first-names (below 24)))
+        (buffer-add-byte! (& name) #\space)
+        (buffer-add-string! (& name) (@ last-names (below 24)))
+        (sqlite-bind! st 1 (+ i 1))
+        (sqlite-bind! st 2 (buffer-string (& name)))
+        (sqlite-bind! st 3 (@ cities city))
+        (sqlite-bind! st 4 (@ countries city))
+        (set! ok (stepped! st err))))
+    (sqlite-finalize st)
+    (buffer-free! (& name))
+    ok))
+
+(define (orders! [db (ptr sqlite)] [err (ptr string)] [customers u32]) -> bool
+  (let ([st (sqlite-prepare db "INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?)" err)] [date (make-buffer)]
+        [id u32 0] [ok #t])
+    (when (== st 0) (return #f))
+    (for ([k u32 0]) (and ok (< k 24)) (+= k 1)
+      (let* ([year (+ 2024 (/ (+ k 10) 12))] [month (+ (% (+ k 10) 12) 1)]
+             [expected (* 80.0 (+ 1.0 (* 0.03 (cast f64 k))) (@ seasons (- month 1)) (+ 0.9 (* 0.2 (chance))))])
+        (for ([n u32 0]) (and ok (< n (cast u32 expected))) (+= n 1)
+          (let* ([category (weighted (slice shares))] [product (+ (* category 6) (below 6))]
+                 [r (below 100)] [quantity u32 (cond [(== category 2) 1] [(< r 68) 1] [(< r 92) 2] [else 3])])
+            (+= id 1)
+            (sqlite-bind! st 1 id)
+            (sqlite-bind! st 2 (+ 1 (below (+ 1 (below customers)))))
+            (sqlite-bind! st 3 (+ product 1))
+            (sqlite-bind! st 4 quantity)
+            (sqlite-bind! st 5 (* (@ prices product) (cast f64 quantity)))
+            (sqlite-bind! st 6 (date-text (& date) year month (+ 1 (below (days-in year month)))))
+            (set! ok (stepped! st err))))))
+    (sqlite-finalize st)
+    (buffer-free! (& date))
+    ok))
+
+(define (shop-open! [err (ptr string)]) -> (ptr sqlite)
+  (let ([db (sqlite-open ":memory:" err)])
+    (when (== db 0) (return db))
+    (unless (and (>= (sqlite-exec db (schema-sql) err) 0) (>= (sqlite-exec db "BEGIN" err) 0)
+                 (products! db err) (customers! db err 320) (orders! db err 320) (>= (sqlite-exec db "COMMIT" err) 0))
+      (sqlite-close db)
+      (return 0))
+    db))

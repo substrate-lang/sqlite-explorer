@@ -1,0 +1,4 @@
+;; A query that sql compiles, with a misspelled column, reported at the column.
+(require-unqualified "../../sql.sub")
+
+(define (main) (printf "~a\n" (-> (sql (from orders (where (> totl 3)))) sql)))

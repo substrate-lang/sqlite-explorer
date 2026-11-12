@@ -1,0 +1,34 @@
+;; The shop's tables, each with its columns and their SQL types. A table's first column is its key.
+(require-unqualified compiler/macros)
+(provide schema schema-columns schema-has? schema-sql)
+
+(define schema datum
+  '((customers (id integer) (name text) (city text) (country text))
+    (products (id integer) (name text) (category text) (price real))
+    (orders (id integer) (customer integer) (product integer) (quantity integer) (total real) (date text))))
+
+(define (schema-columns [table datum]) -> datum
+  (let ([t (assq table schema)]) (if (== t 0) 0 (cdr t))))
+
+(define (schema-has? [table datum] [column datum]) -> bool
+  (let ([columns (schema-columns table)])
+    (and (!= columns 0) (!= (assq column columns) 0))))
+
+(define (schema-sql) -> string
+  (let ([b (make-buffer)] [tables schema])
+    (while (pair? tables)
+      (let ([columns (cdr (car tables))] [first #t])
+        (buffer-add-string! (& b) "create table ")
+        (buffer-add-string! (& b) (symbol->string (car (car tables))))
+        (buffer-add-string! (& b) " (")
+        (while (pair? columns)
+          (unless first (buffer-add-string! (& b) ", "))
+          (buffer-add-string! (& b) (symbol->string (car (car columns))))
+          (buffer-add-byte! (& b) #\space)
+          (buffer-add-string! (& b) (symbol->string (cadr (car columns))))
+          (when first (buffer-add-string! (& b) " primary key"))
+          (set! first #f)
+          (set! columns (cdr columns)))
+        (buffer-add-string! (& b) ");\n"))
+      (set! tables (cdr tables)))
+    (buffer-string (& b))))

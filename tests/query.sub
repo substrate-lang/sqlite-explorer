@@ -1,0 +1,50 @@
+;; The query language: queries and the SQL they become, the text a query is shown as, and the parts it refuses, each
+;; at its line and column.
+(require-unqualified std/test/test)
+(require-unqualified compiler/macros)
+(require-unqualified compiler/reader)
+(require-unqualified "../query.sub")
+
+(define (sql-of [text string]) -> string (query-sql (car (read-all text 'query))))
+
+(define (refusal [text string]) -> string
+  (try (begin (sql-of text) "no refusal")
+       [catch compile-error (message blamed loc)
+         (let ([b (make-buffer)] [at (syntax-srcloc blamed)])
+           (write-digits (& b) (cast u64 (-> at line)) 10)
+           (buffer-add-byte! (& b) #\:)
+           (write-digits (& b) (cast u64 (+ (-> at col) 1)) 10)
+           (buffer-add-byte! (& b) #\space)
+           (buffer-add-string! (& b) (datum->string message))
+           (buffer-string (& b)))]))
+
+(test sql
+  (expect-equal (sql-of "(from orders)") "SELECT * FROM orders")
+  (expect-equal (sql-of "(from orders (limit 5) (order (desc total)) (where (> total 100)))")
+                "SELECT * FROM orders WHERE (total > 100) ORDER BY total DESC LIMIT 5")
+  (expect-equal (sql-of "(from orders (join customers (= orders.customer customers.id)) (group customers.country) (select customers.country (as (sum orders.total) revenue)) (order (desc revenue)))")
+                "SELECT customers.country, SUM(orders.total) AS \"revenue\" FROM orders JOIN customers ON (orders.customer = customers.id) GROUP BY customers.country ORDER BY \"revenue\" DESC")
+  (expect-equal (sql-of "(from orders (group (month date)) (select (as (month date) month) (round (sum total))))")
+                "SELECT strftime('%Y-%m', date) AS \"month\", ROUND(SUM(total)) AS \"(round (sum total))\" FROM orders GROUP BY strftime('%Y-%m', date)")
+  (expect-equal (sql-of "(from customers (where (and (in country \"Spain\" \"Portugal\") (like name \"O'%\"))) (select name))")
+                "SELECT name FROM customers WHERE ((country IN ('Spain', 'Portugal')) AND (name LIKE 'O''%'))")
+  (expect-equal (sql-of "(from products (where (between price 10 20.5)) (select (- price) (count)) (having (> (count) 1)))")
+                "SELECT (-price) AS \"(- price)\", COUNT(*) AS \"(count)\" FROM products WHERE (price BETWEEN 10 AND 20.5) HAVING (COUNT(*) > 1)"))
+
+(test text
+  (expect-equal (query-text (car (read-all "(from orders (where (> total 100)) (limit 5))" 'query)))
+                "(from orders\n  (where (> total 100))\n  (limit 5))"))
+
+(test refusals
+  (expect-equal (refusal "(from customer)") "1:7 query: unknown table customer: the tables are customers, products and orders")
+  (expect-equal (refusal "(from orders (where (> totl 3)))") "1:24 query: no table of this query has a column totl")
+  (expect-equal (refusal "(from orders\n  (join customers (= customer id)))")
+                "2:31 query: both orders and customers have a column id: write orders.id or customers.id")
+  (expect-equal (refusal "(from orders (where (= customers.name 1)))") "1:24 query: customers is not a table of this query")
+  (expect-equal (refusal "(from orders (sort total))")
+                "1:15 query: unknown clause sort: the clauses are join, where, group, having, select, order and limit")
+  (expect-equal (refusal "(from orders (where (> total)))") "1:21 query: expected (> a b)")
+  (expect-equal (refusal "(from orders (where (frob total)))") "1:22 query: unknown operator frob")
+  (expect-equal (refusal "(from orders (limit 0))") "1:21 query: a limit is from 1 to 10000")
+  (expect-equal (refusal "(from orders (where (> total 1)) (where (< total 2)))") "1:34 query: a query has one where clause")
+  (expect-equal (refusal "(select name)") "1:1 query: expected a query, (from table clause ...)"))

@@ -1,0 +1,18 @@
+;; (sql query) is a query in the query language as its SQL and its text, both made when the program compiles. A
+;; mistake in the query is a compile error.
+(provide sql compiled)
+
+(struct compiled [sql string] [text string])
+
+(begin-for-syntax
+  (require-unqualified compiler/macros)
+  (require-unqualified "query.sub")
+
+  (define (literal [d datum]) -> datum (datum->syntax #'here d 0))
+
+  (define (sql-form [s datum]) -> datum
+    (syntax-match s
+      [(_ q) #`(compiled #:sql #,(literal (string->datum (query-sql q))) #:text #,(literal (string->datum (query-text q))))]
+      [_ (raise-syntax-error 'sql "expected (sql (from table clause ...))" s)])))
+
+(define-syntax sql sql-form)

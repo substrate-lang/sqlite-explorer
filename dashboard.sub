@@ -1,0 +1,80 @@
+;; The dashboard: the shop's figures and four panels, each from a query that sql (sql.sub) compiles.
+(require-unqualified web-ui)
+(require-unqualified sqlite)
+(require-unqualified "routes.sub")
+(require-unqualified "results.sub")
+(require-unqualified "views.sub")
+(require-unqualified "sql.sub")
+
+(provide board board-run! dashboard-page)
+
+(struct panel [title string] [query compiled] [result result] [chart chart])
+(struct board [figures result] [people result] [months panel] [best panel] [products panel] [countries panel])
+
+(define (panel-run! [p (ptr panel)] [db (ptr sqlite)] [title string] [q compiled])
+  (set! (-> p title) title)
+  (set! (-> p query) q)
+  (result-run! (& (-> p result)) db (-> q sql))
+  (chart-of! (& (-> p chart)) (& (-> p result))))
+
+(define (board-run! [d (ptr board)] [db (ptr sqlite)])
+  (let ([figures (sql (from orders
+                        (select (as (count) orders) (as (round (sum total)) revenue)
+                                (as (round (avg total) 2) average))))]
+        [people (sql (from customers (select (as (count) customers))))])
+    (result-run! (& (-> d figures)) db (-> figures sql))
+    (result-run! (& (-> d people)) db (-> people sql)))
+  (panel-run! (& (-> d months)) db "Revenue by month"
+              (sql (from orders
+                     (group (month date))
+                     (select (as (month date) month) (as (round (sum total)) revenue))
+                     (order month))))
+  (panel-run! (& (-> d products)) db "Top products"
+              (sql (from orders
+                     (join products (= orders.product products.id))
+                     (group products.name)
+                     (select products.name (as (round (sum orders.total)) revenue))
+                     (order (desc revenue))
+                     (limit 10))))
+  (panel-run! (& (-> d countries)) db "Customers by country"
+              (sql (from customers
+                     (group country)
+                     (select country (as (count) customers))
+                     (order (desc customers)))))
+  (panel-run! (& (-> d best)) db "Best customers"
+              (sql (from orders
+                     (join customers (= orders.customer customers.id))
+                     (group customers.id)
+                     (select customers.name customers.city (as (count) orders) (as (round (sum orders.total)) spent))
+                     (order (desc spent))
+                     (limit 8)))))
+
+(define (first-row [r (ptr result)] [i u32]) -> string
+  (if (== (-> r count) 0) "" (-> (+ (-> r rows cells) i) text)))
+
+(view (figures-view [r (ptr result)])
+  (each [c (-> r columns) (-> r width)] #:key (-> c id)
+    (div ([class "figure"]) (span (text (-> c text))) (strong (text (first-row r (-> c id)))))))
+
+(view (panel-view [p (ptr panel)])
+  (section ([class "panel"])
+    (h2 (text (-> p title)))
+    (if (== (-> p chart kind) chart-bars)
+        (bar-chart (& (-> p chart)))
+        (if (== (-> p chart kind) chart-line) (line-chart (& (-> p chart))) (result-table (& (-> p result)))))
+    (details (summary "Query") (pre (text (-> p query text))))
+    (a ([class "open"] [href (route-href (ask (ask-form #:q (& (-> p query text)))))]) "Open in the query page")))
+
+(view (dashboard-page [d (ptr board)])
+  (h1 "Example shop dashboard")
+  (p ([class "lede"])
+     "A made-up shop's orders, customers and products, in SQLite running in this page. Each panel's query is written "
+     "in a Substrate DSL and was compiled to SQL with the app.")
+  (div ([class "figures"])
+    (figures-view (& (-> d figures)))
+    (figures-view (& (-> d people))))
+  (div ([class "panels"])
+    (panel-view (& (-> d months)))
+    (panel-view (& (-> d best)))
+    (panel-view (& (-> d products)))
+    (panel-view (& (-> d countries)))))
