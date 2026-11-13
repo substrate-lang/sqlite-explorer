@@ -176,7 +176,7 @@
     [run (submit! s)]
     [(example text) (navigate! (route-href (ask (ask-form #:q (& text)))))]))
 
-(define (explorer-init [s (ptr explorer-state)])
+(define (explorer-init [s (ptr explorer-state)] [at place])
   (let* ([why string] [db (shop-open! (& why))])
     (set! (-> s draft) (string-copy (@ examples 0)))
     (set! (-> s version) (string-copy (sqlite-version)))
@@ -186,7 +186,17 @@
           (set! (-> s db) db)
           (board-run! (& (-> s board)) db)
           (tables! s)))
-    (arrived! s (-> s at))))
+    (arrived! s at)))
+
+(define (explorer-free [s (ptr explorer-state)])
+  (talk-free! s)
+  (result-free! (& (-> s rows)))
+  (board-free! (& (-> s board)))
+  (unless (== (-> s tables) 0) (arena-free (& (-> s shelf))))
+  (unless (== (-> s db) 0) (sqlite-close (-> s db)))
+  (free (-> s version bytes))
+  (unless (== (-> s failed length) 0) (free (-> s failed bytes)))
+  (free (-> s draft bytes)))
 
 (define (at-query? [s (ptr explorer-state)]) -> bool (match (-> s at) [(ask f) #t] [_ #f]))
 
@@ -369,6 +379,7 @@
   #:messages explorer-message
   #:update explorer-update
   #:init explorer-init
+  #:free explorer-free
   #:route went
   #:style explorer-style
   (div ([class "explorer"])
