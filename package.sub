@@ -6,5 +6,6 @@
                         (hash "sha256:46fb83ddfccc889216555ebebee8315ee5ef66ac88c75dab63b0c6c228886094"))
                 (web-ui (url "https://github.com/substrate-lang/web-ui/archive/refs/tags/v0.11.3.tar.gz")
                         (hash "sha256:457e4335eab5da7d2dc1f0061a24309ae5537adde5a592b4cd914d81c820bd1d")))
-  (tests (browser))
-  (sites (explorer "app.sub" (html "index.html") (base "/"))))
+  (sites (explorer "app.sub" (html "index.html") (base "/")))
+  (tests "tests/*.sub")
+  (dev-dependencies (chromium)))

@@ -13,7 +13,7 @@
 (require-unqualified "views.sub")
 (require-unqualified "dashboard.sub")
 
-(provide explorer)
+(provide explorer explorer-app)
 
 (struct column-info [id u32] [name string] [type string])
 (struct table-info [id u32] [name string] [title string] [size string] [few bool] [columns (ptr column-info)]
@@ -412,3 +412,13 @@
       (div ([class "bar"])
         (p "SQLite " (text (-> s version)) " runs in this page, compiled to WebAssembly. The shop and its data are made up.")
         (a ([class "more"] [href source]) "Source on GitHub ↗")))))
+
+;; The routes that a server renders: all but a query page with a query, which runs the visitor's SQL, and a table that
+;; the schema does not have.
+(define (rendered? [at (ptr place)]) -> bool
+  (match at
+    [(ask f) (== (-> f q) 0)]
+    [(table name) (schema-table? name)]
+    [_ #t]))
+
+(app explorer-app (explorer) #:rendered rendered?)
