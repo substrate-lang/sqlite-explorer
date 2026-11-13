@@ -5,7 +5,9 @@
 
 (provide shop-open!)
 
-(define seed u32 2463534242)
+(const first-seed u32 2463534242)
+
+(define seed u32 first-seed)
 
 (define (next!) -> u32
   (set! seed (bit-xor seed (<< seed 13)))
@@ -140,6 +142,7 @@
     ok))
 
 (define (shop-open! [err (ptr string)]) -> (ptr sqlite)
+  (set! seed first-seed)
   (let ([db (sqlite-open ":memory:" err)])
     (when (== db 0) (return db))
     (unless (and (>= (sqlite-exec db (schema-sql) err) 0) (>= (sqlite-exec db "BEGIN" err) 0)
