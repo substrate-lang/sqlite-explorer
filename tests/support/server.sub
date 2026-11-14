@@ -1,4 +1,5 @@
-;; The explorer's server for its tests: the site's files, and the explorer's page for a path that names no file.
+;; The explorer's server for its tests. It answers with the site's files, and with the explorer's page for a path that
+;; names no file.
 (require-unqualified host/events)
 (require-unqualified std/http)
 (require-unqualified std/http/server)
