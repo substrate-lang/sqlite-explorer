@@ -7,4 +7,4 @@ query language, a Substrate DSL. The dashboard's queries become SQL when the
 program compiles. The query page's queries become SQL in the browser.
 
     substrate test -A          # the tests, ten of them in Chromium
-    substrate site explorer    # the site, in build/sites/explorer
+    substrate build            # the site, in build/sites/explorer

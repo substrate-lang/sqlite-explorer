@@ -6,7 +6,7 @@
 (require-unqualified "views.sub")
 (require-unqualified "sql.sub")
 
-(provide board board-run! dashboard-page)
+(provide board board-run! board-free! dashboard-page)
 
 (struct panel [title string] [query compiled] [result result] [chart chart])
 (struct board [figures result] [people result] [months panel] [best panel] [products panel] [countries panel])
@@ -16,6 +16,18 @@
   (set! (-> p query) q)
   (result-run! (& (-> p result)) db (-> q sql))
   (chart-of! (& (-> p chart)) (& (-> p result))))
+
+(define (panel-free! [p (ptr panel)])
+  (result-free! (& (-> p result)))
+  (chart-free! (& (-> p chart))))
+
+(define (board-free! [d (ptr board)])
+  (result-free! (& (-> d figures)))
+  (result-free! (& (-> d people)))
+  (panel-free! (& (-> d months)))
+  (panel-free! (& (-> d best)))
+  (panel-free! (& (-> d products)))
+  (panel-free! (& (-> d countries))))
 
 (define (board-run! [d (ptr board)] [db (ptr sqlite)])
   (let ([figures (sql (from orders

@@ -1,6 +1,6 @@
 ;; The shop's tables, each with its columns and their SQL types. A table's first column is its key.
 (require-unqualified compiler/macros)
-(provide schema schema-columns schema-has? schema-sql)
+(provide schema schema-columns schema-has? schema-table? schema-sql)
 
 (define schema datum
   '((customers (id integer) (name text) (city text) (country text))
@@ -13,6 +13,13 @@
 (define (schema-has? [table datum] [column datum]) -> bool
   (let ([columns (schema-columns table)])
     (and (!= columns 0) (!= (assq column columns) 0))))
+
+(define (schema-table? [name string]) -> bool
+  (let ([tables schema])
+    (while (pair? tables)
+      (when (== (symbol->string (car (car tables))) name) (return #t))
+      (set! tables (cdr tables)))
+    #f))
 
 (define (schema-sql) -> string
   (let ([b (make-buffer)] [tables schema])
