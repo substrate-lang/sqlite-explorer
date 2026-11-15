@@ -13,4 +13,4 @@
   [ask ("query" "") (query ask-form)]
   [database ("database" "")]
   [table ("database" [name string] "")]
-  [#:moved ("index.html") dashboard])
+  [#:moved ("index.html") .dashboard])
