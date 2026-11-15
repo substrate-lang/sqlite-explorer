@@ -100,13 +100,13 @@
 
 (define (asked [s (ptr explorer-state)]) -> string
   (match (-> s at)
-    [(ask f) (if (== (-> f q) 0) "" (@ (-> f q)))]
+    [(.ask f) (if (== (-> f q) 0) "" (@ (-> f q)))]
     [_ ""]))
 
 (define (submit! [s (ptr explorer-state)])
   (if (== (asked s) (-> s draft))
       (run! s)
-      (navigate! (route-href (ask (ask-form #:q (& (-> s draft))))))))
+      (navigate! (route-href (place .ask (ask-form #:q (& (-> s draft))))))))
 
 ;; ---- the database ----
 
@@ -161,20 +161,20 @@
 (define (arrived! [s (ptr explorer-state)] [to place])
   (set! (-> s at) to)
   (match to
-    [(ask f)
+    [(.ask f)
      (if (== (-> f q) 0)
          (talk-free! s)
          (begin (draft! s (@ (-> f q))) (run! s)))]
-    [(table name) (table! s name)]
+    [(.table name) (table! s name)]
     [_ (begin)]))
 
 (define (explorer-update [s (ptr explorer-state)] [m (ptr explorer-message)])
   (match m
-    [(went to) (arrived! s to)]
-    [(edited text) (draft! s text)]
-    [(pressed key control meta) (when (and (== key "Enter") (or control meta)) (submit! s))]
-    [run (submit! s)]
-    [(example text) (navigate! (route-href (ask (ask-form #:q (& text)))))]))
+    [(.went to) (arrived! s to)]
+    [(.edited text) (draft! s text)]
+    [(.pressed key control meta) (when (and (== key "Enter") (or control meta)) (submit! s))]
+    [.run (submit! s)]
+    [(.example text) (navigate! (route-href (place .ask (ask-form #:q (& text)))))]))
 
 (define (explorer-init [s (ptr explorer-state)] [at place])
   (let* ([why string] [db (shop-open! (& why))])
@@ -198,12 +198,12 @@
   (unless (== (-> s failed length) 0) (free (-> s failed bytes)))
   (free (-> s draft bytes)))
 
-(define (at-query? [s (ptr explorer-state)]) -> bool (match (-> s at) [(ask f) #t] [_ #f]))
+(define (at-query? [s (ptr explorer-state)]) -> bool (match (-> s at) [(.ask f) #t] [_ #f]))
 
-(define (at-database? [s (ptr explorer-state)]) -> bool (match (-> s at) [database #t] [(table name) #t] [_ #f]))
+(define (at-database? [s (ptr explorer-state)]) -> bool (match (-> s at) [.database #t] [(.table name) #t] [_ #f]))
 
 (define (showing? [s (ptr explorer-state)] [t (ptr table-info)]) -> bool
-  (match (-> s at) [(table name) (== name (-> t name))] [_ #f]))
+  (match (-> s at) [(.table name) (== name (-> t name))] [_ #f]))
 
 (define (table-title [s (ptr explorer-state)]) -> string
   (if (== (-> s shown) 0) "Database · SQLite explorer" (-> s shown title)))
@@ -218,16 +218,16 @@
        "Queries are written in a small query language, a Substrate DSL. This page turns each one into SQL and runs it "
        "with SQLite, here in your browser.")
     (textarea ([value (-> s draft)] [rows 8] [spellcheck "false"] [autocapitalize "off"] ["aria-label" "Query"]
-               [on input (edited (event value))] [on keydown (pressed (event key) (event control) (event meta))]))
+               [on input (.edited (event value))] [on keydown (.pressed (event key) (event control) (event meta))]))
     (div ([class "actions"])
-      (button ([class "run"] [on click run]) "Run")
+      (button ([class "run"] [on click .run]) "Run")
       (span ([class "hint"]) "Ctrl+Enter or ⌘+Enter runs the query too."))
     (div ([class "examples"])
       (span "Examples:")
-      (button ([on click (example (@ examples 0))]) (text (@ example-names 0)))
-      (button ([on click (example (@ examples 1))]) (text (@ example-names 1)))
-      (button ([on click (example (@ examples 2))]) (text (@ example-names 2)))
-      (button ([on click (example (@ examples 3))]) (text (@ example-names 3))))
+      (button ([on click (.example (@ examples 0))]) (text (@ example-names 0)))
+      (button ([on click (.example (@ examples 1))]) (text (@ example-names 1)))
+      (button ([on click (.example (@ examples 2))]) (text (@ example-names 2)))
+      (button ([on click (.example (@ examples 3))]) (text (@ example-names 3))))
     (when (!= (-> s problem) "") (p ([class "problem"]) (text (-> s problem))))
     (when (!= (-> s sql) "") (div ([class "sql"]) (span "SQL") (pre (text (-> s sql)))))
     (when (!= (-> s summary) "") (p ([class "summary"]) (text (-> s summary))))
@@ -241,7 +241,7 @@
     (each [c (-> t columns) (-> t width)] #:key (-> c id) (li (code (text (-> c name))) " " (span (text (-> c type)))))))
 
 (view (table-card [t (ptr table-info)])
-  (a ([class "table-card"] [href (route-href (table (-> t name)))])
+  (a ([class "table-card"] [href (route-href (place .table (-> t name)))])
     (h2 (text (-> t name)))
     (p (text (-> t size)) " rows")
     (columns-view t)))
@@ -252,7 +252,7 @@
     (columns-view t)
     (p (if (-> t few) "Its rows, from this query:" "Its first 50 rows, from this query:"))
     (pre (text (-> t text)))
-    (a ([class "open"] [href (route-href (ask (ask-form #:q (& (-> t text)))))]) "Open in the query page")
+    (a ([class "open"] [href (route-href (place .ask (ask-form #:q (& (-> t text)))))]) "Open in the query page")
     (result-table (& (-> s rows)))))
 
 (view (database-page [s (ptr explorer-state)])
@@ -261,9 +261,9 @@
     (p ([class "lede"]) "The shop's three tables, in SQLite in this page.")
     (nav ([class "tabs"] [aria-label "Tables"])
       (each [t (-> s tables) (-> s table-count)] #:key (-> t id)
-        (a ([href (route-href (table (-> t name)))] ["aria-current" (current (showing? s t))]) (text (-> t name)))))
+        (a ([href (route-href (place .table (-> t name)))] ["aria-current" (current (showing? s t))]) (text (-> t name)))))
     (match (-> s at)
-      [(table name)
+      [(.table name)
        (if (== (-> s shown) 0)
            (p "No table has this name. The tables are customers, products and orders.")
            (table-detail s (-> s shown)))]
@@ -380,7 +380,7 @@
   #:update explorer-update
   #:init explorer-init
   #:free explorer-free
-  #:route went
+  #:route .went
   #:style explorer-style
   (div ([class "explorer"])
     (header ([class "top"])
@@ -390,23 +390,23 @@
             (span ([class "mark"] [aria-hidden "true"]) (span ([class "mark-cursor"])))
             "substrate")
           (span ([class "slash"] [aria-hidden "true"]) "/")
-          (a ([class "app"] [href (route-href dashboard)]) "SQLite explorer"))
+          (a ([class "app"] [href (route-href (place .dashboard))]) "SQLite explorer"))
         (nav ([aria-label "Explorer"])
-          (a ([href (route-href dashboard)] ["aria-current" (current (route-current? dashboard))]) "Dashboard")
-          (a ([href (route-href (ask (ask-form #:q 0)))] ["aria-current" (current (at-query? s))]) "Query")
-          (a ([href (route-href database)] ["aria-current" (current (at-database? s))]) "Database")
+          (a ([href (route-href (place .dashboard))] ["aria-current" (current (route-current? (place .dashboard)))]) "Dashboard")
+          (a ([href (route-href (place .ask (ask-form #:q 0)))] ["aria-current" (current (at-query? s))]) "Query")
+          (a ([href (route-href (place .database))] ["aria-current" (current (at-database? s))]) "Database")
           (a ([href source]) "GitHub ↗"))))
     (main
       (if (!= (-> s failed) "")
           (p ([class "problem"]) "The shop's database could not be made: " (text (-> s failed)))
           (match (-> s at)
-            [dashboard (title "SQLite explorer") (dashboard-page (& (-> s board)))]
-            [(ask f) (title "Query · SQLite explorer") (query-page s)]
-            [database (title "Database · SQLite explorer") (database-page s)]
-            [(table name) (title (table-title s)) (database-page s)]
-            [lost
+            [.dashboard (title "SQLite explorer") (dashboard-page (& (-> s board)))]
+            [(.ask f) (title "Query · SQLite explorer") (query-page s)]
+            [.database (title "Database · SQLite explorer") (database-page s)]
+            [(.table name) (title (table-title s)) (database-page s)]
+            [.lost
              (title "Not found · SQLite explorer")
-             (section (h1 "Not found") (p "No page is at this address. " (a ([href (route-href dashboard)]) "The dashboard")
+             (section (h1 "Not found") (p "No page is at this address. " (a ([href (route-href (place .dashboard))]) "The dashboard")
                                           " has the shop's figures."))])))
     (footer ([class "foot"])
       (div ([class "bar"])
@@ -417,8 +417,8 @@
 ;; the schema does not have.
 (define (rendered? [at (ptr place)]) -> bool
   (match at
-    [(ask f) (== (-> f q) 0)]
-    [(table name) (schema-table? name)]
+    [(.ask f) (== (-> f q) 0)]
+    [(.table name) (schema-table? name)]
     [_ #t]))
 
 (app explorer-app (explorer) #:rendered rendered?)

@@ -75,7 +75,7 @@
         (bar-chart (& (-> p chart)))
         (if (== (-> p chart kind) chart-line) (line-chart (& (-> p chart))) (result-table (& (-> p result)))))
     (details (summary "Query") (pre (text (-> p query text))))
-    (a ([class "open"] [href (route-href (ask (ask-form #:q (& (-> p query text)))))]) "Open in the query page")))
+    (a ([class "open"] [href (route-href (place .ask (ask-form #:q (& (-> p query text)))))]) "Open in the query page")))
 
 (view (dashboard-page [d (ptr board)])
   (h1 "Example shop dashboard")
