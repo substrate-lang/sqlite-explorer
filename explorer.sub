@@ -413,8 +413,8 @@
         (p "SQLite " (text (-> s version)) " runs in this page, compiled to WebAssembly. The shop and its data are made up.")
         (a ([class "more"] [href source]) "Source on GitHub ↗")))))
 
-;; The routes that a server renders: all but a query page with a query, which runs the visitor's SQL, and a table that
-;; the schema does not have.
+;; The routes that a server renders. That is all of them except a query page with a query, which runs the visitor's
+;; SQL, and a table that the schema does not have.
 (define (rendered? [at (ptr place)]) -> bool
   (match at
     [(.ask f) (== (-> f q) 0)]
