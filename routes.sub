@@ -2,7 +2,7 @@
 (require-unqualified std/http/form)
 (require-unqualified std/http/routable)
 
-(provide place dashboard ask database table lost ask-form place.url-read place.url-write! place.url-check)
+(provide place ask-form place.url-read place.url-write! place.url-check)
 
 (struct ask-form [q (ptr string)])
 
@@ -13,4 +13,4 @@
   [ask ("query" "") (query ask-form)]
   [database ("database" "")]
   [table ("database" [name string] "")]
-  [#:moved ("index.html") dashboard])
+  [#:moved ("index.html") .dashboard])
